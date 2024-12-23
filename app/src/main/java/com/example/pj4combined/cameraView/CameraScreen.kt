@@ -37,14 +37,10 @@ import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
-
 private lateinit var bitmapBuffer: Bitmap
-
-
 
 @Composable
 fun CameraScreen() {
-    // Obtain the current context and lifecycle owner
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val detectionResults = remember { mutableStateOf<DetectionResult?>(null) }
@@ -57,22 +53,25 @@ fun CameraScreen() {
         )
     }
 
-    // Initialize our background executor
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
 
-    val resolutionSelector =  ResolutionSelector.Builder().setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY).build()
+    val resolutionSelector = ResolutionSelector.Builder()
+        .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+        .build()
+
     val preview = remember { Preview.Builder().setResolutionSelector(resolutionSelector).build() }
-    val imageAnalyzer = remember {ImageAnalysis.Builder()
+    val imageAnalyzer = remember {
+        ImageAnalysis.Builder()
             .setResolutionSelector(resolutionSelector)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .setOutputImageFormat(OUTPUT_IMAGE_FORMAT_RGBA_8888)
-            .build() }
-
+            .build()
+    }
 
     val previewView = remember { PreviewView(context) }
 
     LaunchedEffect(Unit) {
-
+        // Initialize GPU-based classifier
         val personClassifierGPU = PersonClassifier()
         withContext(Dispatchers.IO) {
             personClassifierGPU.initialize(context, useGPU = true)
@@ -81,10 +80,8 @@ fun CameraScreen() {
 
         preview.surfaceProvider = previewView.surfaceProvider
 
-        // The analyzer can then be assigned to the instance
         imageAnalyzer.setAnalyzer(cameraExecutor) { image ->
             detectObjects(image, personClassifierGPU)
-            // Close the image proxy
             image.close()
         }
 
@@ -101,37 +98,46 @@ fun CameraScreen() {
         Log.d("CS330", "Camera bound")
     }
 
+    // Check inference time and potentially switch to CPU
     if (detectionResults.value != null) {
         // TODO:
         //  Choose your inference time threshold
-        val inferenceTimeThreshold = 200000
+        val inferenceTimeThreshold = 1500
 
         if (detectionResults.value!!.inferenceTime > inferenceTimeThreshold) {
             Log.d("CS330", "GPU too slow, switching to CPU start")
             // TODO:
             //  Create new classifier to be run on CPU with 2 threads
 
+            val personClassifierCPU = PersonClassifier()
+
+            personClassifierCPU.initialize(context, useGPU = false, threadNumber = 2)
+
+            personClassifierCPU.setDetectorListener(listener)
+
             // TODO:
             //  Set imageAnalyzer to use the new classifier
+            imageAnalyzer.clearAnalyzer()
+            imageAnalyzer.setAnalyzer(cameraExecutor) { image ->
+                detectObjects(image, personClassifierCPU)
+                image.close()
+            }
 
             Log.d("CS330", "GPU too slow, switching to CPU done")
-        }
-    }
-
-    // Display the Camera Preview
-    ShowCameraPreview( previewView )
+        }}
+    ShowCameraPreview(previewView)
     Text(buildAnnotatedString {
-            if (detectionResults.value != null) {
-                val detectionResult = detectionResults.value!!
-                withStyle(style = SpanStyle(color = Color.Blue, fontSize = 20.sp)) {
-                    append("inference time ${detectionResult.inferenceTime}\n")
-                }
-                if (detectionResult.detections.find { it.categories[0].label == "person" } != null) {
-                    withStyle(style = SpanStyle(color = Color.Red, fontSize = 40.sp)) {
-                        append("human detected")
-                    }
+        if (detectionResults.value != null) {
+            val detectionResult = detectionResults.value!!
+            withStyle(style = SpanStyle(color = Color.Blue, fontSize = 20.sp)) {
+                append("inference time ${detectionResult.inferenceTime}\n")
+            }
+            if (detectionResult.detections.find { it.categories[0].label == "person" } != null) {
+                withStyle(style = SpanStyle(color = Color.Red, fontSize = 40.sp)) {
+                    append("human detected")
                 }
             }
+        }
     })
 }
 
@@ -145,19 +151,14 @@ fun ShowCameraPreview(previewView: PreviewView) {
 
 fun detectObjects(image: ImageProxy, personClassifier: PersonClassifier) {
     if (!::bitmapBuffer.isInitialized) {
-        // The image rotation and RGB image buffer are initialized only once
-        // the analyzer has started running
         bitmapBuffer = Bitmap.createBitmap(
             image.width,
             image.height,
             Bitmap.Config.ARGB_8888
         )
     }
-    // Copy out RGB bits to the shared bitmap buffer
     image.use { bitmapBuffer.copyPixelsFromBuffer(image.planes[0].buffer) }
     val imageRotation = image.imageInfo.rotationDegrees
-
-    // Pass Bitmap and rotation to the object detector helper for processing and detection
     personClassifier.detect(bitmapBuffer, imageRotation)
 }
 
